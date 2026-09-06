@@ -15,16 +15,22 @@ class AiHealth
   }.freeze
 
   attr_reader :selected_llm_provider, :effective_llm_provider, :llm_model,
-              :llm_endpoint, :llm_request_timeout, :openai_endpoint, :vector_store_adapter,
+              :llm_endpoint, :llm_request_timeout, :probe_request_timeout, :openai_endpoint, :vector_store_adapter,
               :embedding_endpoint, :embedding_model, :embedding_dimensions,
               :pgvector_extension_available, :pgvector_extension_enabled,
               :pgvector_table_available, :qdrant_endpoint, :llm_probe,
               :function_calling_probe, :pdf_text_extraction_probe,
               :pdf_vision_processing_probe, :vector_store_probe, :embedding_probe
 
-  def initialize(run_probes: true, force_probes: false)
+  # probe_cache lets a caller isolate where probe results are cached. The web
+  # admin page shares the default `Rails.cache`-backed probe cache so repeat
+  # page loads within the TTL don't re-hit providers; worker-originated
+  # verification (see WorkerAiHealthCheckJob) passes an isolated store so its
+  # results can never be served back to a web request, and vice versa (#3169).
+  def initialize(run_probes: true, force_probes: false, probe_cache: Rails.cache)
     @run_probes = run_probes
     @force_probes = force_probes
+    @probe_cache = probe_cache
     load_llm_status
     load_vector_store_status
     load_probes
@@ -102,6 +108,21 @@ class AiHealth
     :passing
   end
 
+  def vector_store_failure_kind
+    return unless vector_store_adapter == :pgvector
+    return unless vector_store_status == :failing
+
+    failure_codes = [ vector_store_probe.failure_code, embedding_probe.failure_code ].compact
+    return :pgvector_extension_not_enabled if failure_codes.include?(:extension_not_enabled)
+    return :pgvector_table_not_found if failure_codes.include?(:table_not_found)
+    return :embedding_dimensions_mismatch if failure_codes.include?(:dimensions_mismatch)
+    return :pgvector_probe_failed if vector_store_probe.failing?
+    return :embedding_probe_timeout if failure_codes.include?(:timeout) && embedding_probe.failing?
+    return :embedding_probe_failed if embedding_probe.failing?
+
+    :vector_probe_failed
+  end
+
   def openai_vector_store_uses_custom_endpoint?
     vector_store_adapter == :openai && @openai_custom_endpoint
   end
@@ -144,6 +165,7 @@ class AiHealth
       @llm_model = effective_model(provider_for_details)
       @llm_endpoint = endpoint(provider_for_details)
       @llm_request_timeout = request_timeout(provider_for_details)
+      @probe_request_timeout = probe_request_timeout_value
       @openai_uses_responses_endpoint = @effective_llm_protocol == :openai &&
         safely(false) { @llm_provider.supports_responses_endpoint? }
       @pdf_processing_capable = safely(false) do
@@ -183,7 +205,7 @@ class AiHealth
       @embedding_probe = vector_store_adapter == :pgvector ? Probe.not_checked : Probe.not_configured
       return unless run_probes?
 
-      probe = Probe.new(force: @force_probes)
+      probe = Probe.new(force: @force_probes, cache: @probe_cache)
       if llm_configured?
         @llm_probe = probe.llm(
           provider: @effective_llm_protocol,
@@ -338,12 +360,22 @@ class AiHealth
       ENV["OPENAI_ACCESS_TOKEN"].presence || Setting.openai_access_token
     end
 
+    # Reports the timeout used by normal LLM requests for the selected provider.
     def request_timeout(provider)
       if provider == :anthropic
         ENV.fetch("ANTHROPIC_REQUEST_TIMEOUT", 600).to_i
       else
-        ENV.fetch("OPENAI_REQUEST_TIMEOUT", 60).to_i
+        Provider::Openai.request_timeout
       end
+    end
+
+    # Timeout applied to the admin "live checks" probes. Delegates to
+    # Probe.timeout so System Health reports the exact bound the probes use,
+    # guaranteeing the two can never drift. Deliberately distinct from
+    # request_timeout, which bounds the LLM calls the app makes during
+    # normal use (chat, PDF import).
+    def probe_request_timeout_value
+      Probe.timeout
     end
 
     def openai_uri_base
