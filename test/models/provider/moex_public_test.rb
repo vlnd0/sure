@@ -263,6 +263,21 @@ class Provider::MoexPublicTest < ActiveSupport::TestCase
     assert_in_delta 1020.0, response.data.price, 0.001
   end
 
+  test "fetch_security_prices stamps a rouble-settled FX bond's live price with FACEUNIT" do
+    @provider.stubs(:resolve_instrument).returns(fx_bond_instrument)
+    stub_history([])
+    stub_current_price(
+      securities: { "facevalue" => "100", "faceunit" => "USD", "currencyid" => "SUR", "prevprice" => "94.368" },
+      marketdata: { "last" => "93.7", "marketprice" => nil, "lcurrentprice" => nil, "lcloseprice" => nil, "waprice" => nil }
+    )
+
+    response = @provider.fetch_security_price(symbol: "RU000A10CRC4", exchange_operating_mic: "MISX", date: Date.current)
+
+    assert response.success?
+    assert_in_delta 93.7, response.data.price, 0.001, "93.7% of a 100 USD par must be 93.70"
+    assert_equal "USD", response.data.currency, "the quote is in par currency, not the rouble settlement currency"
+  end
+
   test "fetch_security_prices reads per-row FACEVALUE for amortizing bonds" do
     d1 = Date.current - 6
     d2 = Date.current - 5
@@ -413,6 +428,10 @@ class Provider::MoexPublicTest < ActiveSupport::TestCase
 
     def eurobond_instrument
       { secid: "RU000A0JX0J2", engine: "stock", market: "bonds", board: "TQOD", currency: "USD", name: "Eurobond", kind: "bond" }
+    end
+
+    def fx_bond_instrument
+      { secid: "RU000A10CRC4", engine: "stock", market: "bonds", board: "TQCB", currency: "RUB", name: "NorNickel 1P14", kind: "bond" }
     end
 
     # ----- column-array block builders -----

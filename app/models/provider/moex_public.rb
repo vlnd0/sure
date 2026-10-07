@@ -386,7 +386,12 @@ class Provider::MoexPublic < Provider
       return nil if value <= 0
 
       value = bond_price(value, sec["facevalue"]) if bond
-      currency = normalize_currency(sec["currencyid"].presence || sec["faceunit"].presence || instrument[:currency])
+      # A bond quote is % of par, so the price is in the face-value currency.
+      # Currency-denominated bonds settle in roubles (CURRENCYID SUR), so
+      # FACEUNIT must win, as it does for history rows.
+      currency = normalize_currency(
+        (bond ? sec["faceunit"].presence : nil) || sec["currencyid"].presence || sec["faceunit"].presence || instrument[:currency]
+      )
 
       Price.new(
         symbol: secid,
