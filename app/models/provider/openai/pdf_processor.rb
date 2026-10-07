@@ -105,6 +105,8 @@ class Provider::Openai::PdfProcessor
 
     PdfProcessingResult = Provider::LlmConcept::PdfProcessingResult
 
+    # Summarize extracted PDF text using the existing uncapped text request.
+    # @return [Provider::LlmConcept::PdfProcessingResult] parsed document summary
     def process_with_text_extraction
       effective_model = model.presence || Provider::Openai::DEFAULT_MODEL
 
@@ -126,7 +128,6 @@ class Provider::Openai::PdfProcessor
         ],
         response_format: { type: "json_object" }
       }
-      params[:max_completion_tokens] = max_response_tokens if native_gpt6?
 
       response = client.chat(parameters: params)
 
@@ -159,6 +160,8 @@ class Provider::Openai::PdfProcessor
       nil
     end
 
+    # Summarize rendered pages using the endpoint's completion-limit contract.
+    # @return [Provider::LlmConcept::PdfProcessingResult] parsed document summary
     def process_with_vision
       effective_model = model.presence || Provider::Openai::DEFAULT_MODEL
 
@@ -190,7 +193,11 @@ class Provider::Openai::PdfProcessor
           { role: "user", content: content }
         ]
       }
-      params[native_gpt6? ? :max_completion_tokens : :max_tokens] = max_response_tokens
+      if Provider::Openai.native_pdf_completion_limit?(model: effective_model, custom_provider: custom_provider)
+        params[:max_completion_tokens] = max_response_tokens if max_response_tokens
+      else
+        params[:max_tokens] = max_response_tokens
+      end
 
       response = client.chat(parameters: params)
 
@@ -204,10 +211,6 @@ class Provider::Openai::PdfProcessor
       )
 
       parse_response_generic(response)
-    end
-
-    def native_gpt6?
-      !custom_provider && model.to_s.start_with?("gpt-6")
     end
 
     # Render each PDF page to a base64-encoded PNG using pdftoppm

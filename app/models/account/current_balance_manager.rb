@@ -1,7 +1,10 @@
 class Account::CurrentBalanceManager
   InvalidOperation = Class.new(StandardError)
 
-  Result = Struct.new(:success?, :changes_made?, :error, keyword_init: true)
+  # `historical?` marks the statement as older than the anchor: it was recorded
+  # behind the current balance, which nothing about the account as it stands now
+  # should follow.
+  Result = Struct.new(:success?, :changes_made?, :error, :historical?, keyword_init: true)
 
   def initialize(account)
     @account = account
@@ -30,17 +33,23 @@ class Account::CurrentBalanceManager
     end
   end
 
-  def set_current_balance(balance)
-    if account.linked?
-      result = set_current_balance_for_linked_account(balance)
+  # Stage provider totals for cash capture while manual totals retain reconciliation.
+  # `date` is the day the balance describes, for a provider whose figures are
+  # as of a statement rather than of this moment. It only applies to a linked
+  # account: a manual one has no statement, and its strategies reconcile against
+  # today by design.
+  def set_current_balance(balance, date: nil, provider_balance: false)
+    @provider_balance = provider_balance && account.accounting_start_date.present?
+    if @provider_balance || !account.manual_accounting?
+      set_current_balance_for_linked_account(balance, date || Date.current)
     else
       result = set_current_balance_for_manual_account(balance)
+
+      # Update cache field so changes appear immediately to the user
+      account.update!(balance: balance)
+
+      result
     end
-
-    # Update cache field so changes appear immediately to the user
-    account.update!(balance: balance)
-
-    result
   rescue => e
     Result.new(success?: false, changes_made?: false, error: e.message)
   end
@@ -71,7 +80,7 @@ class Account::CurrentBalanceManager
       if account.balance_type == :cash && account.valuations.reconciliation.empty?
         adjust_opening_balance_with_delta(new_balance: balance, old_balance: account.balance)
       else
-        existing_reconciliation = account.entries.valuations.find_by(date: Date.current)
+        existing_reconciliation = account.entries.valuations.where.not(entryable_id: Valuation.cash_anchor.select(:id)).find_by(date: Date.current)
 
         result = reconciliation_manager.reconcile_balance(balance: balance, date: Date.current, existing_valuation_entry: existing_reconciliation)
 
@@ -96,24 +105,69 @@ class Account::CurrentBalanceManager
     # Before overwriting a stale (previous-day) current_anchor, we convert it to a
     # reconciliation valuation. This preserves the API-reported balance as a historical
     # waypoint that the ReverseCalculator uses for more accurate balance history.
-    def set_current_balance_for_linked_account(balance)
+    def set_current_balance_for_linked_account(balance, date)
       changes_made = false
+      error = nil
+      historical = false
 
-      ActiveRecord::Base.transaction do
-        # If an anchor exists from a previous day, preserve it as a reconciliation
-        # before replacing it with today's fresh anchor.
-        preserve_anchor_as_reconciliation_if_stale if current_anchor_valuation
+      # Locked, with the anchor re-read inside it: everything below turns on
+      # which side of the anchor's date this statement falls, and a sync running
+      # beside this one can move that anchor between the read and the write.
+      account.with_lock do
+        @current_anchor_valuation = nil
 
-        # Re-check: the memoized value was cleared if the anchor was converted
-        if current_anchor_valuation
-          changes_made = update_current_anchor(balance)
+        if anchor_newer_than?(date)
+          # A statement older than the anchor already holds is a correction to a
+          # day gone by, not the balance now. It is recorded on its own date,
+          # the newer anchor is left where it stands, and the cached balance --
+          # which is the balance now -- is not touched.
+          result = record_historical_balance(balance, date)
+          changes_made = result.changes_made?
+          error = result.error
+          historical = true
         else
-          create_current_anchor(balance)
-          changes_made = true
+          # Only a statement that moves the balance forward leaves the previous
+          # anchor behind as a reconciliation. One carrying the anchor's own date
+          # is that same anchor restated, so it is updated rather than duplicated.
+          preserve_anchor_as_reconciliation_if_stale(date) if current_anchor_valuation
+
+          # Re-check: the memoized value was cleared if the anchor was converted
+          if current_anchor_valuation
+            changes_made = update_current_anchor(balance, date)
+          else
+            create_current_anchor(balance, date)
+            changes_made = true
+          end
+
+          # Update cache field so changes appear immediately to the user
+          account.update!(balance: balance) unless @provider_balance
         end
       end
 
-      Result.new(success?: true, changes_made?: changes_made, error: nil)
+      Result.new(success?: error.nil?, changes_made?: changes_made, error: error, historical?: historical)
+    end
+
+    def anchor_newer_than?(date)
+      current_anchor_valuation.present? && current_anchor_valuation.entry.date > date
+    end
+
+    def record_historical_balance(balance, date)
+      entry = account.entries.valuations.where.not(entryable_id: Valuation.cash_anchor.select(:id)).find_by(date: date)
+      if @provider_balance
+        entry ||= account.entries.build(
+          name: Valuation.build_reconciliation_name(account.accountable_type),
+          entryable: Valuation.new(kind: "reconciliation")
+        )
+        entry.source = "provider_balance"
+      end
+
+      result = reconciliation_manager.reconcile_balance(
+        balance: balance,
+        date: date,
+        existing_valuation_entry: entry
+      )
+
+      Result.new(success?: result.success?, changes_made?: result.success?, error: result.error_message)
     end
 
     def current_anchor_valuation
@@ -125,9 +179,9 @@ class Account::CurrentBalanceManager
     # balance waypoints over time without creating extra entries per sync.
     #
     # Same-day updates are left in place (no extra reconciliations on repeated syncs).
-    def preserve_anchor_as_reconciliation_if_stale
+    def preserve_anchor_as_reconciliation_if_stale(date)
       entry = current_anchor_valuation.entry
-      return if entry.date == Date.current # Same-day update — nothing to preserve
+      return if entry.date == date # Same-day update — nothing to preserve
 
       current_anchor_valuation.update!(kind: "reconciliation")
       entry.update!(name: Valuation.build_reconciliation_name(account.accountable_type))
@@ -139,12 +193,14 @@ class Account::CurrentBalanceManager
       @current_anchor_valuation = nil
     end
 
-    def create_current_anchor(balance)
+    # Tag imported totals so shared materialization can isolate their reported cash.
+    def create_current_anchor(balance, date)
       account.entries.create!(
-        date: Date.current,
+        date: date,
         name: Valuation.build_current_anchor_name(account.accountable_type),
         amount: balance,
         currency: account.currency,
+        source: @provider_balance ? "provider_balance" : nil,
         entryable: Valuation.new(kind: "current_anchor")
       )
 
@@ -152,19 +208,21 @@ class Account::CurrentBalanceManager
       @current_anchor_valuation = nil
     end
 
-    def update_current_anchor(balance)
+    # Update the total anchor without prematurely replacing a mixed account's balance.
+    def update_current_anchor(balance, date)
       changes_made = false
 
       # Update associated entry attributes
       entry = current_anchor_valuation.entry
+      entry.source = @provider_balance ? "provider_balance" : nil
 
       if entry.amount != balance
         entry.amount = balance
         changes_made = true
       end
 
-      if entry.date != Date.current
-        entry.date = Date.current
+      if entry.date != date
+        entry.date = date
         changes_made = true
       end
 

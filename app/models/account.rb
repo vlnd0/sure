@@ -1,4 +1,5 @@
 class Account < ApplicationRecord
+  has_one :bitcoin_wallet_account, dependent: :destroy
   include AASM, Syncable, Monetizable, Chartable, Linkable, Enrichable, Anchorable, Reconcileable, TaxTreatable
 
   before_validation :assign_default_owner, if: -> { owner_id.blank? }
@@ -405,19 +406,26 @@ class Account < ApplicationRecord
       create_and_sync(attributes, skip_initial_sync: true)
     end
 
+    TRADE_REPUBLIC_ACCOUNT_TYPES = {
+      "portfolio" => [ "Investment", "brokerage", "Trade Republic Portfolio" ],
+      "cash" => [ "Depository", "checking", "Trade Republic Cash" ],
+      # The exchange subtype is the Crypto subtype that supports trades.
+      "crypto" => [ "Crypto", "exchange", "Trade Republic Crypto" ]
+    }.freeze
+
     def create_from_trade_republic_account(trade_republic_account)
       family = trade_republic_account.trade_republic_item.family
-      is_cash = trade_republic_account.cash?
+      accountable_type, subtype, default_name = TRADE_REPUBLIC_ACCOUNT_TYPES.fetch(trade_republic_account.kind)
 
       attributes = {
         family: family,
-        name: trade_republic_account.name.presence || (is_cash ? "Trade Republic Cash" : "Trade Republic Portfolio"),
+        name: trade_republic_account.name.presence || default_name,
         balance: 0,
         cash_balance: 0,
         currency: trade_republic_account.currency.presence || family.currency,
-        accountable_type: is_cash ? "Depository" : "Investment",
+        accountable_type: accountable_type,
         accountable_attributes: {
-          subtype: is_cash ? "checking" : "brokerage"
+          subtype: subtype
         }
       }
 
@@ -582,7 +590,12 @@ class Account < ApplicationRecord
     raise e
   end
 
+  # Select current composition using each provider's scope of position ownership.
   def current_holdings
+    if position_tracking? || accounting_start_date
+      return Holding::CurrentPositions.new(self).scope
+    end
+
     if (provider_snapshot_date = latest_provider_holdings_snapshot_date)
       holdings
         .where.not(account_provider_id: nil)
@@ -601,6 +614,16 @@ class Account < ApplicationRecord
         .order(amount: :desc)
     end
   end
+
+  # New data needs a follow-up after a running materializer has built its cache;
+  # pending jobs may be reused only within the same completion tree.
+  def coalescible_syncs(parent_sync: nil)
+    return super unless accounting_start_date
+
+    scope = syncs.visible.pending
+    parent_sync ? scope.where(parent_id: [ nil, parent_sync.id ]) : scope
+  end
+  private :coalescible_syncs
 
   def latest_provider_holdings_snapshot_date
     holdings.where.not(account_provider_id: nil).maximum(:date)
@@ -645,6 +668,8 @@ class Account < ApplicationRecord
   # Determines if this account supports manual trade entry
   # Investment accounts always support trades; Crypto only if subtype is "exchange"
   def supports_trades?
+    return true if position_tracking?
+
     return true if investment?
     return accountable.supports_trades? if crypto? && accountable.respond_to?(:supports_trades?)
     false
