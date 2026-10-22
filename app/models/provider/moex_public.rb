@@ -5,7 +5,8 @@
 #
 # Covers Russian-market instruments that Yahoo dropped after 2022 — shares,
 # funds/ETF/БПИФ (e.g. LQDT), and bonds (OFZ + corporate) — and doubles as an
-# exchange-rate provider for RUB↔{USD,EUR,CNY} via the selt (FX) market.
+# exchange-rate provider for RUB↔{USD,EUR,CNY} via the selt (FX) market, with
+# Yahoo Finance filling in the pairs selt does not quote.
 #
 # ISS responses are column-array JSON: each block is { "columns" => [...],
 # "data" => [[...], ...] }. We index every row by lowercased column name so the
@@ -470,11 +471,11 @@ class Provider::MoexPublic < Provider
     #          Exchange rates
     # ================================
 
-    # Returns Rate[] for a RUB-crossed pair, or [] for anything else (other
-    # providers handle non-RUB pairs). selt is quoted X/RUB; we invert for RUB→X.
+    # Returns Rate[] for the pair. selt is quoted X/RUB; we invert for RUB→X.
+    # Pairs selt does not quote come from Yahoo Finance.
     def exchange_rates(from, to, start_date, end_date)
       pair = fx_pair(from, to)
-      return [] unless pair
+      return yahoo_crossed_rates(from, to, start_date, end_date) unless pair
 
       instrument = FX_INSTRUMENTS.fetch(pair[:currency])
       quotes = fx_history(instrument, start_date, end_date)
@@ -495,6 +496,37 @@ class Provider::MoexPublic < Provider
         end
         Rate.new(date: quote[:date], from: from, to: to, rate: rate)
       end.sort_by(&:date)
+    end
+
+    # A pair without RUB (EUR→USD, USD→GEL) is Yahoo's rate as is. A RUB pair
+    # with a currency selt lacks (GEL, JPY, KZT) is crossed through USD, so
+    # the rouble leg is still the exchange's USD/RUB close: X→RUB = X→USD × USD→RUB.
+    def yahoo_crossed_rates(from, to, start_date, end_date)
+      f = from.to_s.upcase
+      t = to.to_s.upcase
+      return [] if f == t
+      return yahoo_rates(f, t, start_date, end_date) unless [ f, t ].include?("RUB")
+
+      to_usd = yahoo_rates(f == "RUB" ? t : f, "USD", start_date, end_date)
+      return [] if to_usd.empty?
+
+      # The lookback gives the first Yahoo day a USD/RUB close on or before it;
+      # after that the latest close carries over MOEX holidays.
+      usd_rub = exchange_rates("USD", "RUB", start_date - FX_RATE_LOOKBACK_DAYS, end_date)
+      i = -1
+      to_usd.sort_by(&:date).filter_map do |leg|
+        i += 1 while i + 1 < usd_rub.size && usd_rub[i + 1].date <= leg.date
+        next if i.negative?
+
+        to_rub = BigDecimal(leg.rate.to_s) * BigDecimal(usd_rub[i].rate.to_s)
+        rate = f == "RUB" ? BigDecimal("1") / to_rub : to_rub
+        Rate.new(date: leg.date, from: from, to: to, rate: rate.round(12))
+      end
+    end
+
+    def yahoo_rates(from, to, start_date, end_date)
+      response = Provider::YahooFinance.new.fetch_exchange_rates(from: from, to: to, start_date: start_date, end_date: end_date)
+      response.success? ? response.data : []
     end
 
     # { currency: "USD", invert: false } for X→RUB; invert: true for RUB→X; nil
