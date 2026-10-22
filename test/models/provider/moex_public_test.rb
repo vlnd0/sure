@@ -1,8 +1,6 @@
 require "test_helper"
 
 class Provider::MoexPublicTest < ActiveSupport::TestCase
-  include ProviderTestHelper
-
   setup do
     @provider = Provider::MoexPublic.new
     @provider.stubs(:throttle_request)
@@ -360,43 +358,19 @@ class Provider::MoexPublicTest < ActiveSupport::TestCase
     assert_in_delta 12.4, cny.data.rate.to_f
   end
 
-  test "fetch_exchange_rates takes a pair without RUB from Yahoo as is" do
+  test "fetch_exchange_rates returns empty for a non-RUB-crossed pair" do
     @provider.expects(:get_json).never
-    start_date = Date.current - 5
-    end_date = Date.current - 1
-    yahoo = [ fx_rate(end_date, "USD", "EUR", 0.92) ]
-    Provider::YahooFinance.any_instance.expects(:fetch_exchange_rates)
-      .with(from: "USD", to: "EUR", start_date: start_date, end_date: end_date)
-      .returns(provider_success_response(yahoo))
 
-    response = @provider.fetch_exchange_rates(from: "USD", to: "EUR", start_date: start_date, end_date: end_date)
+    response = @provider.fetch_exchange_rates(
+      from: "USD", to: "EUR", start_date: Date.current - 5, end_date: Date.current - 1
+    )
 
     assert response.success?
-    assert_equal yahoo, response.data
+    assert_empty response.data
   end
 
-  test "fetch_exchange_rates crosses a RUB pair selt does not quote through USD" do
-    day1 = Date.new(2026, 10, 12)
-    day2 = day1 + 1 # no selt close: day1's USD/RUB carries over
-    stub_fx_history("USD000UTSTOM", [ fx_row(tradedate: day1.to_s, close: "80") ])
-    Provider::YahooFinance.any_instance.stubs(:fetch_exchange_rates)
-      .with(from: "GEL", to: "USD", start_date: day1, end_date: day2)
-      .returns(provider_success_response([ fx_rate(day2, "GEL", "USD", 0.4), fx_rate(day1, "GEL", "USD", 0.37) ]))
-
-    gel_rub = @provider.fetch_exchange_rates(from: "GEL", to: "RUB", start_date: day1, end_date: day2).data
-    rub_gel = @provider.fetch_exchange_rates(from: "RUB", to: "GEL", start_date: day1, end_date: day2).data
-
-    assert_equal [ day1, day2 ], gel_rub.map(&:date)
-    assert_equal [ 29.6, 32.0 ], gel_rub.map { |r| r.rate.to_f }
-    assert_equal [ "GEL", "RUB" ], [ gel_rub.first.from, gel_rub.first.to ]
-    assert_in_delta 1 / 32.0, rub_gel.last.rate.to_f, 1e-12
-    assert_equal [ "RUB", "GEL" ], [ rub_gel.last.from, rub_gel.last.to ]
-  end
-
-  test "fetch_exchange_rate fails (no crash) when Yahoo has no rate either" do
+  test "fetch_exchange_rate fails (no crash) for a non-RUB-crossed pair" do
     @provider.expects(:get_json).never
-    Provider::YahooFinance.any_instance.stubs(:fetch_exchange_rates)
-      .returns(provider_error_response(Provider::YahooFinance::Error.new("no data")))
 
     response = @provider.fetch_exchange_rate(from: "USD", to: "EUR", date: Date.current - 1)
 
@@ -523,10 +497,6 @@ class Provider::MoexPublicTest < ActiveSupport::TestCase
 
     def fx_row(**attrs)
       attrs.transform_keys(&:to_s)
-    end
-
-    def fx_rate(date, from, to, rate)
-      Provider::ExchangeRateConcept::Rate.new(date: date, from: from, to: to, rate: rate)
     end
 
     def stub_fx_history(instrument, rows)
