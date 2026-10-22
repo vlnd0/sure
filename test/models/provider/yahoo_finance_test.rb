@@ -383,6 +383,25 @@ class Provider::YahooFinanceTest < ActiveSupport::TestCase
   #      Exchange Rate Tests
   # ================================
 
+  test "fetch_exchange_rates rejects a quote Yahoo gives no currency for" do
+    @provider.stubs(:throttle_request)
+    date = Date.new(2026, 10, 22)
+    @provider.stubs(:fetch_authenticated_chart).with("GELRUB=X", anything)
+             .returns("chart" => { "error" => { "code" => "Not Found" } })
+    # Live on that date: GEL per 100 RUB, with no currency.
+    @provider.stubs(:fetch_authenticated_chart).with("RUBGEL=X", anything).returns(
+      "chart" => { "result" => [ {
+        "meta" => { "currency" => nil },
+        "timestamp" => [ date.to_time.utc.to_i ],
+        "indicators" => { "quote" => [ { "close" => [ 3.1481 ] } ] }
+      } ] }
+    )
+
+    response = @provider.fetch_exchange_rates(from: "GEL", to: "RUB", start_date: date, end_date: date)
+
+    assert_not response.success?
+  end
+
   test "fetch_exchange_rate returns 1.0 for same currency" do
     date = Date.parse("2024-01-15")
     response = @provider.fetch_exchange_rate(from: "USD", to: "USD", date: date)
