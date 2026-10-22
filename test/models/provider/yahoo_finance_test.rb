@@ -789,7 +789,7 @@ class Provider::YahooFinanceTest < ActiveSupport::TestCase
   end
 
   test "USER_AGENTS contains multiple modern browser user-agents" do
-    assert Provider::YahooFinance::USER_AGENTS.length >= 5
+    assert Provider::YahooFinance::USER_AGENTS.length >= 2
     assert Provider::YahooFinance::USER_AGENTS.all? { |ua| ua.include?("Mozilla") }
   end
 

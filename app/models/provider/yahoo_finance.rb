@@ -44,12 +44,12 @@ class Provider::YahooFinance < Provider
   # Pool of modern browser user-agents to rotate through
   # Based on https://github.com/ranaroussi/yfinance/pull/2277
   # UPDATED user-agents string on 2026-02-27 with current versions of browsers (Chrome 145, Firefox 148, Safari 26)
+  # On 2026-10-22 Yahoo answered every chart request with 429 for the macOS
+  # Chrome, Safari and Firefox 148 agents, so they are out of the pool. The
+  # client keeps one agent, and retries cannot recover from a blocked one.
   USER_AGENTS = [
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36",
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 15_7_4) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Safari/605.1.15",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36 Edg/145.0.0.0",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:148.0) Gecko/20100101 Firefox/148.0"
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36 Edg/145.0.0.0"
   ].freeze
 
   def initialize
