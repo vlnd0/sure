@@ -17,7 +17,11 @@ class Balance::Materializer
   # Serialize mixed-account publication and persist holdings and balances atomically.
   def materialize_balances
     Balance.transaction do
-      account.lock! if account.accounting_start_date
+      # Every materialization of an account -- a sync, or a lot edit's
+      # restatement -- locks the account row before writing anything, so two of
+      # them serialise in one lock order rather than deadlocking on each other's
+      # holding rows.
+      account.lock!
       materialize_holdings
       capture_provider_cash
       calculate_balances

@@ -11,6 +11,10 @@ Rails.application.routes.draw do
     end
   end
 
+  resources :web_push_subscriptions, only: [ :create, :show, :destroy ] do
+    post :test_notification, on: :member
+  end
+
   resources :questrade_items, only: [ :index, :new, :create, :show, :edit, :update, :destroy ] do
     collection do
       get :preload_accounts
@@ -182,6 +186,7 @@ Rails.application.routes.draw do
       get :oauth_callback
       get :oauth_device_authorize
       post :start_oauth_device_flow
+      post :personal_key
     end
 
     member do
@@ -598,6 +603,10 @@ Rails.application.routes.draw do
       post :reset_security
       post :sync_prices
     end
+
+    resources :lots, only: :update, controller: "holding_lots" do
+      post :unlock, on: :member
+    end
   end
   resources :trades, only: %i[show new create update destroy] do
     member do
@@ -629,6 +638,7 @@ Rails.application.routes.draw do
     collection do
       delete :clear_filter
       get :name_suggestions
+      get :filters, to: "transactions/filters#show"
     end
 
     member do
@@ -752,6 +762,7 @@ Rails.application.routes.draw do
       get :sparkline
       patch :toggle_active
       patch :toggle_exclude_from_reports
+      patch :reconcile_all
       patch :set_default
       patch :remove_default
       get :select_provider

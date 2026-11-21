@@ -83,7 +83,7 @@ class SnaptradeAccount::SplitSecurityRepair
         plans.each { |plan| apply(plan) }
         refuse_concurrent_change!(plans)
         Balance::Materializer.new(
-          account, strategy: :reverse, security_ids: plans.map { |plan| plan[:result].target_id }
+          account, strategy: account.balance_calculation_strategy, security_ids: plans.map { |plan| plan[:result].target_id }
         ).materialize_balances
       end
     rescue Refused
