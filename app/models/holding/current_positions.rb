@@ -13,7 +13,10 @@ class Holding::CurrentPositions
     complete_provider_ids = links.filter_map do |link|
       link.id unless link.adapter&.position_only?
     end
-    latest = holdings.where(account_provider_id: complete_provider_ids).group(:account_provider_id).maximum(:date)
+    closed_provider_ids = links.filter_map do |link|
+      link.id if link.provider_type == "SimplefinAccount" && link.provider&.raw_holdings_payload == []
+    end
+    latest = holdings.where(account_provider_id: complete_provider_ids - closed_provider_ids).group(:account_provider_id).maximum(:date)
     provider_security_ids = holdings.where(account_provider_id: complete_provider_ids).select(:security_id)
     eligible = holdings.where(account_provider_id: nil).where.not(security_id: provider_security_ids)
     position_ids = links.map(&:id) - complete_provider_ids

@@ -77,13 +77,15 @@ module ExchangeRate::Provided
       response = fx_provider.fetch_exchange_rate(from: from, to: to, date: date)
       Rails.cache.write(FALLBACK_DOWN_KEY, true, expires_in: 1.minute) if fail_fast && !response.success? && response.error.failure_code == :unreachable
       rate = if response.success?
+        ExchangeRatePair.record_direct_quote(from: from, to: to)
         response.data
       elsif !fail_fast
-        # The provider may quote both USD legs even when the direct pair fails.
+        # The provider has no such pair, but it may still quote both USD legs.
         ExchangeRate::UsdCross.new(fx_provider)
-          .rates(from: from, to: to, start_date: date - NEAREST_RATE_LOOKBACK_DAYS, end_date: date).last
+          .rates(from: from, to: to, start_date: date - NEAREST_RATE_LOOKBACK_DAYS, end_date: date, error: response.error).last
       end
-      return nil unless rate
+
+      return nil unless rate # Provider error, and no USD legs either
 
       return rate unless cache
 
@@ -119,6 +121,14 @@ module ExchangeRate::Provided
           Rails.logger.warn("Could not replace unusable exchange rate #{rate.from}/#{rate.to} on #{rate.date}: #{e.message}")
         end
       end
+
+      # Reached only when no usable rate was stored for the date, so this one
+      # is a rate a balance may have had to do without
+      # (ExchangeRate::BalanceRefresh).
+      ExchangeRate::BalanceRefresh.enqueue(
+        [ { from: stored.from_currency, to: stored.to_currency, date: stored.date, stored_at: stored.created_at } ],
+        source: "ExchangeRate.find_or_fetch_rate", provider: fx_provider
+      )
       rate
     end
 
